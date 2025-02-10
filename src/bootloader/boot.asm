@@ -31,31 +31,8 @@ ebr_system_id:				db 'FAT12   '			; 8 bytes
 
 ; End header
 
+
 start:
-	jmp main
-
-; Prints a string to the screen
-; Params:
-;	- ds:si points to a string
-puts:
-	; save registers to be modified
-	push si
-	push ax
-.loop:
-	lodsb		; loads the next char into al
-	or al, al	; check if the char is null
-	jz .done	; if null go to .done
-
-	mov ah, 0x0e	; call bios interrupt
-	mov bh, 0x00
-	int 0x10
-	jmp .loop
-.done:
-	pop ax
-	pop si
-	ret
-
-main:
 	; setup data segments
 	mov ax, 0
 	mov ds, ax
@@ -65,25 +42,157 @@ main:
 	mov ss, ax
 	mov sp, 0x7C00
 
+	push es
+	push word .after
+	retf
+.after:
 	; read floppy disc
 	mov [ebr_drive_number], dl
+
+	; show loading message
+	mov si, message_loading
+	call print
+
+	; read drive parameters
+	push es
+	mov ah, 08h
+	int 13h
+	jc floppy_error
+	pop es
+
+	and cl, 0x3F						; remove top 2 bits
+	xor ch, ch
+	mov [bdb_sectors_per_track], cx		; sector count
+
+	inc dh
+	mov [bdb_heads], dh					; head count
 	
-	mov ax, 1 					; lba = 1, second sector of disk
-	mov cl, 1 					; 1 sector to read
-	mov bx, 0x7E00 
+	; read FAT root dir
+	mov ax, [bdb_sectors_per_fat]		; lba of root dir = reserved + fats * sectors_per_fat
+	mov bl, [bdb_fat_count]
+	xor bh, bh
+	mul bx								; ax = fats * sectors_per_fat
+	add ax, [bdb_reserved_sectors]		; ax = lba of root dir
+	push ax
+
+	; compute size of root dir = (32 * number_of_entries) / bytes_per_sector
+	mov ax, [bdb_dir_entries_count]
+	shl ax, 5							; ax *= 32
+	xor dx, dx
+	div word [bdb_bytes_per_sector]		; number of sectors to read
+
+	test dx, dx							; if dx != 0, add 1
+	jz .root_dir_after
+	inc ax
+
+.root_dir_after:
+	;read root directory
+	mov cl, al							; cl = number of sectors to read = size of root dir
+	pop ax								; ax = lba of root
+	mov dl, [ebr_drive_number]			; dl = drive number
+	mov bx, buffer						; es:bx = buffer
 	call disk_read
 
-	; print message
-	mov si, message_hello
-	call puts
+	; search for kernel.bin
+	xor bx, bx
+	mov di, buffer
+
+.search_kernel:
+	mov si, file_kernel_bin
+	mov cx, 11							; compare up to 11 chars
+	push di
+	repe cmpsb							; compare the two bytes
+	pop di
+	je .found_kernel
+
+	add di, 32
+	inc bx
+	cmp bx, [bdb_dir_entries_count]
+	jl .search_kernel
+
+	jmp kernel_not_found_error
+
+.found_kernel:
+	; di should have the address to the entry
+	mov ax, [di + 26]
+	mov [kernel_cluster], ax
+
+	; load FAT from disk to mem
+	mov ax, [bdb_reserved_sectors]
+	mov bx, buffer
+	mov cl, [bdb_sectors_per_fat]
+	mov dl, [ebr_drive_number]
+	call disk_read
+
+	; read kernel and process FAT chain
+	mov bx, KERNEL_LOAD_SEGMENT
+	mov es, bx
+	mov bx, KERNEL_LOAD_OFFSET
+
+.load_kernel_loop:
+	; read next cluster
+	mov ax, [kernel_cluster]
+	add ax, 31
+
+	mov cl, 1
+	mov dl, [ebr_drive_number]
+	call disk_read
+
+	add bx, [bdb_bytes_per_sector]
+
+	; computer location of next cluster
+	mov ax, [kernel_cluster]
+	mov cx, 3
+	mul cx
+	mov cx, 2
+	div cx
+
+	mov si, buffer
+	add si, ax
+	mov ax, [ds:si]
+
+	or dx, dx
+	jz .even
+
+.odd:
+	shr ax, 4
+	jmp .next_cluster_after
+
+.even:
+	and ax, 0x0FFF
+
+.next_cluster_after:
+	cmp ax, 0x0FF8		; end of chain
+	jae	.read_finish
+
+	mov [kernel_cluster], ax
+	jmp .load_kernel_loop
+
+.read_finish:
+	; jump to kernel
+	mov dl, [ebr_drive_number]
+
+	mov ax, KERNEL_LOAD_SEGMENT
+	mov ds, ax
+	mov es, ax
+
+	jmp KERNEL_LOAD_SEGMENT:KERNEL_LOAD_OFFSET
+
+	jmp wait_key_and_reboot
 
 	cli
 	hlt
 
+
 floppy_error:
 	mov si, message_failed
-	call puts
+	call print
 	jmp wait_key_and_reboot
+
+kernel_not_found_error:
+    mov si, message_kernel_not_found
+    call print
+    jmp wait_key_and_reboot
 
 wait_key_and_reboot:
 	mov ah, 0
@@ -91,9 +200,34 @@ wait_key_and_reboot:
 	jmp 0FFFFh:0 	; jump to start of BIOS
 
 .halt:
-	cli		; diable interrupts
+	cli				; diable interrupts
 	hlt
 
+; Prints a string to the screen
+; Params:
+;   - ds:si points to string
+print:
+    ; save registers we will modify
+    push si
+    push ax
+    push bx
+
+.loop:
+    lodsb               ; loads next character in al
+    or al, al           ; verify if next character is null?
+    jz .done
+
+    mov ah, 0x0E        ; call bios interrupt
+    mov bh, 0           ; set page number to 0
+    int 0x10
+
+    jmp .loop
+
+.done:
+    pop bx
+    pop ax
+    pop si    
+    ret
 
 ; Disk routines
 
@@ -105,7 +239,6 @@ wait_key_and_reboot:
 ;	- cx [bits 6-15]: cylinder
 ;	- dh: head
 lba_to_chs:
-
 	push ax
 	push dx
 
@@ -135,7 +268,6 @@ lba_to_chs:
 ;	- dl: drive number
 ;	- ex:bx: memory address to store read data
 disk_read:
-
 	push ax
 	push bx
 	push cx
@@ -189,10 +321,17 @@ disk_reset:
 	popa
 	ret
 	
+message_loading:			db 'Loading...', ENDL, 0
+message_failed: 			db 'Failed to load floppy', ENDL, 0
+message_kernel_not_found:	db 'KERNEL.BIN not found', ENDL, 0
+file_kernel_bin:        	db 'KERNEL  BIN'
+kernel_cluster:				dw 0
 
-message_hello: 		db 'DuckOs', ENDL, 0
-message_failed: 	db 'Failed to load floppy', ENDL, 0
+KERNEL_LOAD_SEGMENT			equ 0x2000
+KERNEL_LOAD_OFFSET			equ 0
 
 
 times 510-($-$$) db 0
 dw 0AA55h
+
+buffer:
