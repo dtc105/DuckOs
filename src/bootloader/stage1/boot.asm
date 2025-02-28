@@ -98,7 +98,7 @@ start:
 	mov di, buffer
 
 .search_kernel:
-	mov si, file_kernel_bin
+	mov si, file_stage2_bin
 	mov cx, 11							; compare up to 11 chars
 	push di
 	repe cmpsb							; compare the two bytes
@@ -115,7 +115,7 @@ start:
 .found_kernel:
 	; di should have the address to the entry
 	mov ax, [di + 26]
-	mov [kernel_cluster], ax
+	mov [stage2_cluster], ax
 
 	; load FAT from disk to mem
 	mov ax, [bdb_reserved_sectors]
@@ -125,13 +125,13 @@ start:
 	call disk_read
 
 	; read kernel and process FAT chain
-	mov bx, KERNEL_LOAD_SEGMENT
+	mov bx, STAGE2_LOAD_SEGMENT
 	mov es, bx
-	mov bx, KERNEL_LOAD_OFFSET
+	mov bx, STAGE2_LOAD_OFFSET
 
 .load_kernel_loop:
 	; read next cluster
-	mov ax, [kernel_cluster]
+	mov ax, [stage2_cluster]
 	add ax, 31
 
 	mov cl, 1
@@ -141,7 +141,7 @@ start:
 	add bx, [bdb_bytes_per_sector]
 
 	; computer location of next cluster
-	mov ax, [kernel_cluster]
+	mov ax, [stage2_cluster]
 	mov cx, 3
 	mul cx
 	mov cx, 2
@@ -165,18 +165,18 @@ start:
 	cmp ax, 0x0FF8		; end of chain
 	jae	.read_finish
 
-	mov [kernel_cluster], ax
+	mov [stage2_cluster], ax
 	jmp .load_kernel_loop
 
 .read_finish:
 	; jump to kernel
 	mov dl, [ebr_drive_number]
 
-	mov ax, KERNEL_LOAD_SEGMENT
+	mov ax, STAGE2_LOAD_SEGMENT
 	mov ds, ax
 	mov es, ax
 
-	jmp KERNEL_LOAD_SEGMENT:KERNEL_LOAD_OFFSET
+	jmp STAGE2_LOAD_SEGMENT:STAGE2_LOAD_OFFSET
 
 	jmp wait_key_and_reboot
 
@@ -190,7 +190,7 @@ floppy_error:
 	jmp wait_key_and_reboot
 
 kernel_not_found_error:
-    mov si, message_kernel_not_found
+    mov si, message_stage2_not_found
     call print
     jmp wait_key_and_reboot
 
@@ -323,12 +323,12 @@ disk_reset:
 	
 message_loading:			db 'Loading...', ENDL, 0
 message_failed: 			db 'Failed to load floppy', ENDL, 0
-message_kernel_not_found:	db 'KERNEL.BIN not found', ENDL, 0
-file_kernel_bin:        	db 'KERNEL  BIN'
-kernel_cluster:				dw 0
+message_stage2_not_found:	db 'STAGE2.BIN not found', ENDL, 0
+file_stage2_bin:        	db 'STAGE2  BIN'
+stage2_cluster:				dw 0
 
-KERNEL_LOAD_SEGMENT			equ 0x2000
-KERNEL_LOAD_OFFSET			equ 0
+STAGE2_LOAD_SEGMENT			equ 0x2000
+STAGE2_LOAD_OFFSET			equ 0
 
 
 times 510-($-$$) db 0
