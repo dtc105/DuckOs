@@ -1,4 +1,5 @@
 build/*
+
+**/*.err
 **/*.ini
 **/*.txt
-**/*.err
